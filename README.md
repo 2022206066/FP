@@ -18,11 +18,11 @@ This implementation provides:
 
 ## Project Structure
 
+```text
 ECS-Breakout/
-├── index.html # Complete single-file implementation
-├── README.md # This documentation
-└── (No external dependencies)
-
+├── index.html
+└── README.md
+```
 
 ## ECS Architecture
 
@@ -103,6 +103,7 @@ const updateEntity = (entity, updates) => Object.assign(
         }
     }
 );
+```
 
 ### System Pipeline Composition
 ```javascript
@@ -112,7 +113,7 @@ const gameSystems = pipe(
     ScoreSystem,
     LivesSystem
 );
-
+```
 
 ## Setup Instructions
 
@@ -196,7 +197,7 @@ const PowerUpSystem = entities => {
 };
 
 const extendedPipeline = pipe(gameSystems, PowerUpSystem);
-
+```
 
 ## License
 
