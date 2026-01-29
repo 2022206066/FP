@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en-US">
+    <head>
+        <meta charset="utf-8" />
+        <title>BREAKOUT - ECS Functional (MOUSE ONLY ON MOVE)</title>
+        <style>
+            * {padding: 0; margin: 0;}
+            canvas {background: #eeeeee; display: block; margin: 0 auto;}
+        </style>
+    </head>
+    <body>
+        <canvas id="myCanvas" width="1280" height="720"></canvas>
+
+        <script>
+            // === ECS ENGINE SETUP ===
+            const canvas = document.getElementById("myCanvas");
+            const ctx = canvas.getContext("2d");
+
+            // === GAME CONSTANTS ===
+            const BALL_RADIUS = 10;
+            const PADDLE_HEIGHT = 15;
+            const PADDLE_WIDTH = 150;
+            const CANVAS_HEIGHT = 720;
+            const CANVAS_WIDTH = 1280;
+            const PADDLE_Y = CANVAS_HEIGHT - PADDLE_HEIGHT;
+            const MAX_PADDLE_X = CANVAS_WIDTH - PADDLE_WIDTH;
+            const PADDLE_SPEED = 7;
+
+            // === 1. ECS COMPONENTS (Pure functions creating immutable data) ===
+            const Position = (x, y) => ({ x, y });
+            const Velocity = (dx, dy) => ({ dx, dy });
+            const Size = (w, h) => ({ width: w, height: h });
+            const Renderable = (color = "#000000") => ({ color });
+            const InputControlled = () => ({});
+            const InputEvent = (mouseX = 0, keys = {left: false, right: false, spacePressed: false}, mouseMoved = false) => ({mouseX, keys, mouseMoved});
+            const BrickData = (status = 1, row = 0) => ({ status, row });
+            const ScoreData = (value = 0) => ({ value });
+            const LivesData = (value = 3) => ({ value });
+            const GameStateData = (started = false, paused = false, gameWon = false, gameOver = false) => ({ 
+                started, paused, gameWon, gameOver 
+            });
+
+            // === 2. FUNCTIONAL PROGRAMMING UTILITIES (Higher-order functions) ===
+            const pipe = (...fns) => x => fns.reduce((v, f) => f(v), x);
+
+            // === 3. ECS ENTITY MANAGEMENT (Immutability preserved) ===
+            function Entity(components = {}) {
+                this.id = Math.random().toString(36).substr(2, 9);
+                this.components = components;
+            }
+            Entity.prototype.hasComponent = function(name) { return this.components[name] !== undefined; };
+            Entity.prototype.hasComponents = function(names) { return names.every(n => this.hasComponent(n)); };
+
+            const updateEntity = (entity, updates) => Object.assign(
+                Object.create(Entity.prototype),
+                { id: entity.id, components: {
+                ...entity.components,
+                ...Object.fromEntries(Object.entries(updates).map(([k,v]) => [k, {...(entity.components[k]||{}), ...v}]))
+                }}
+            );
+
+            // === 4. VISUAL HELPERS ===
+            const getBrickColor = (row) => {
+                const rowFraction = row / 9;
+                if (rowFraction <= 0.17) return "#FF0000";
+                else if (rowFraction <= 0.33) return "#FF8C00";
+                else if (rowFraction <= 0.50) return "#FFFF00";
+                else if (rowFraction <= 0.67) return "#00FF00";
+                else if (rowFraction <= 0.83) return "#0000FF";
+                else if (rowFraction <= 0.94) return "#4B0082";
+                else return "#EE82EE";
+            };
+
+            // === 5. GLOBAL INPUT STATE (Single source of truth - updated by events) ===
+            let globalInput = { 
+                left: false, 
+                right: false, 
+                spacePressed: false, 
+                mouseX: 0,
+                mouseMoved: false,
+                lastMouseX: 0
+            };
+
+            // === 6. REQUIRED SYSTEMS ===
+            // Input System (REQUIRED): Handles keyboard + mouse with priority logic
+            const InputSystem = entities => {
+                const paddle = entities.find(e => e.hasComponent('inputControlled'));
+                const inputEventEntity = entities.find(e => e.hasComponent('inputEvent'));
+                const gameStateEntity = entities.find(e => e.hasComponent('gameStateData'));
+                
+                if (!inputEventEntity || !gameStateEntity || !paddle) return entities;
+                
+                const inputEvent = InputEvent(globalInput.mouseX, globalInput, globalInput.mouseMoved);
+                let updatedEntities = entities.map(e => e.id === inputEventEntity.id
+                ? updateEntity(e, { inputEvent }) : e
+                );
+                
+                const gameState = gameStateEntity.components.gameStateData;
+                
+                // Game start/continue (SPACEBAR or CLICK)
+                if (globalInput.spacePressed && (!gameState.started || gameState.paused)) {
+                    updatedEntities = updatedEntities.map(e => {
+                        if (e.hasComponent('gameStateData')) {
+                            return updateEntity(e, { gameStateData: { started: true, paused: false } });
+                        }
+                        if (e.hasComponents(['position','velocity'])) {
+                            return updateEntity(e, { 
+                                position: { x: 640, y: 690 }, 
+                                velocity: { dx: 5, dy: -5 }, 
+                                renderable: { color: '#000' } 
+                            });
+                        }
+                        return e;
+                    });
+                    globalInput.spacePressed = false;
+                }
+                
+                // Input priority: Keys > Moving Mouse > Stationary
+                let newX = paddle.components.position.x;
+                
+                if (globalInput.left) {
+                    newX = Math.max(paddle.components.position.x - PADDLE_SPEED, 0);
+                } else if (globalInput.right) {
+                    newX = Math.min(paddle.components.position.x + PADDLE_SPEED, MAX_PADDLE_X);
+                } 
+                else if (globalInput.mouseMoved && globalInput.mouseX > 0 && globalInput.mouseX < CANVAS_WIDTH) {
+                    const paddleCenterX = Math.max(PADDLE_WIDTH/2, Math.min(globalInput.mouseX, CANVAS_WIDTH - PADDLE_WIDTH/2));
+                    newX = paddleCenterX - PADDLE_WIDTH/2;
+                }
+                
+                return updatedEntities.map(e => e.id === paddle.id && newX !== paddle.components.position.x
+                ? updateEntity(e, { position: { x: newX } }) : e
+                );
+            };
+
+            // === 7. STUDENT-DEFINED SYSTEMS (4 custom systems for Breakout) ===
+            // Physics System: Ball movement + boundary collision
+            const PhysicsSystem = entities => {
+                const gameState = entities.find(e => e.hasComponent('gameStateData'));
+                if (!gameState?.components.gameStateData.started || gameState.components.gameStateData.paused || 
+                    gameState.components.gameStateData.gameWon || gameState.components.gameStateData.gameOver)
+                return entities;
+                    
+                return entities.map(e => {
+                    if (!e.hasComponents(['velocity','position'])) return e;
+                    
+                    let pos = e.components.position;
+                    let vel = {...e.components.velocity};
+                    
+                    if (pos.x + vel.dx > CANVAS_WIDTH - BALL_RADIUS || pos.x + vel.dx < BALL_RADIUS) 
+                        vel.dx *= -1;
+                    if (pos.y + vel.dy < BALL_RADIUS) 
+                        vel.dy *= -1;
+                    
+                    return updateEntity(e, {
+                        position: { x: pos.x + vel.dx, y: pos.y + vel.dy },
+                        velocity: vel
+                    });
+                });
+            };
+
+            // Collision System: Brick + paddle collision detection
+            const CollisionSystem = entities => {
+                const gameState = entities.find(e => e.hasComponent('gameStateData'));
+                if (!gameState?.components.gameStateData.started || gameState.components.gameStateData.paused ||
+                    gameState.components.gameStateData.gameWon || gameState.components.gameStateData.gameOver)
+                return entities;
+                    
+                const ball = entities.find(e => e.hasComponents(['position','velocity']));
+                if (!ball) return entities;
+                
+                const paddle = entities.find(e => e.hasComponent('inputControlled'));
+                const bricks = entities.filter(e => e.hasComponent('brickData'));
+                
+                let updatedEntities = [...entities];
+                
+                for (let brick of bricks) {
+                if (brick.components.brickData.status === 1) {
+                    if (ball.components.position.x > brick.components.position.x &&
+                        ball.components.position.x < brick.components.position.x + 75 &&
+                        ball.components.position.y > brick.components.position.y &&
+                        ball.components.position.y < brick.components.position.y + 20) {
+                        
+                        updatedEntities = updatedEntities.map(e => {
+                            if (e.id === brick.id) {
+                                return updateEntity(e, { brickData: { status: 0 } });
+                            }
+                            if (e.id === ball.id) {
+                                return updateEntity(e, { 
+                                    velocity: { ...ball.components.velocity, dy: -ball.components.velocity.dy }, 
+                                    renderable: { color: getBrickColor(brick.components.brickData.row) }
+                                });
+                            }
+                            return e;
+                        });
+                        break;
+                    }
+                }
+                }
+                
+                const nextBallX = ball.components.position.x + ball.components.velocity.dx;
+                const nextBallY = ball.components.position.y + ball.components.velocity.dy;
+                
+                if (nextBallY > CANVAS_HEIGHT - BALL_RADIUS) {
+                if (nextBallX > paddle.components.position.x && 
+                    nextBallX < paddle.components.position.x + PADDLE_WIDTH) {
+                        
+                    const correctedY = PADDLE_Y - BALL_RADIUS - 1;
+                    updatedEntities = updatedEntities.map(e => e.id === ball.id
+                    ? updateEntity(e, { 
+                        velocity: { ...ball.components.velocity, dy: -ball.components.velocity.dy },
+                        position: { y: correctedY }
+                        })
+                    : e
+                    );
+                }
+                }
+                
+                return updatedEntities;
+            };
+
+            // Score System: Track destroyed bricks
+            const ScoreSystem = entities => {
+                const bricks = entities.filter(e => e.hasComponent('brickData'));
+                const destroyed = bricks.filter(b => b.components.brickData.status === 0).length;
+                const scoreEntity = entities.find(e => e.hasComponent('scoreData'));
+                
+                if (!scoreEntity) return entities;
+                
+                return entities.map(e => e.id === scoreEntity.id
+                ? updateEntity(e, { scoreData: { value: destroyed } }) : e
+                );
+            };
+
+            // Lives System: Win/lose conditions + life management
+            const LivesSystem = entities => {
+                const gameState = entities.find(e => e.hasComponent('gameStateData'));
+                const livesEntity = entities.find(e => e.hasComponent('livesData'));
+                const ball = entities.find(e => e.hasComponents(['position','velocity']));
+                const bricks = entities.filter(e => e.hasComponent('brickData'));
+                const scoreEntity = entities.find(e => e.hasComponent('scoreData'));
+                
+                if (gameState.components.gameStateData.gameWon || gameState.components.gameStateData.gameOver ||
+                    gameState.components.gameStateData.paused) return entities;
+                
+                if (bricks.filter(b => b.components.brickData.status === 1).length === 0 && !gameState.components.gameStateData.gameWon) {
+                    setTimeout(() => { alert(`YOU WIN! Score: ${scoreEntity.components.scoreData.value}`); document.location.reload(); }, 0);
+                    return entities.map(e => e.id === gameState.id 
+                        ? updateEntity(e, { gameStateData: { gameWon: true } }) : e);
+                }
+                
+                if (ball.components.position.y > CANVAS_HEIGHT) {
+                if (livesEntity.components.livesData.value <= 1 && !gameState.components.gameStateData.gameOver) {
+                    setTimeout(() => { alert(`GAME OVER! Final Score: ${scoreEntity.components.scoreData.value}`); document.location.reload(); }, 0);
+                    return entities.map(e => e.id === gameState.id 
+                    ? updateEntity(e, { gameStateData: { gameOver: true } }) : e);
+                } else {
+                    return entities.map(e => {
+                    if (e.id === livesEntity.id) {
+                        return updateEntity(e, { livesData: { value: livesEntity.components.livesData.value - 1 } });
+                    }
+                    if (e.id === gameState.id) {
+                        return updateEntity(e, { gameStateData: { paused: true } });
+                    }
+                    if (e.id === ball.id) {
+                        return updateEntity(e, { position: { x: 640, y: 690 }, velocity: { dx: 5, dy: -5 }, renderable: { color: '#000' } });
+                    }
+                    return e;
+                    });
+                }
+                }
+                
+                return entities;
+            };
+
+            // Rendering System (REQUIRED): Full canvas rendering + UI states
+            const RenderSystem = entities => {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                const gameState = entities.find(e => e.hasComponent('gameStateData'));
+                const livesEntity = entities.find(e => e.hasComponent('livesData'));
+                const scoreEntity = entities.find(e => e.hasComponent('scoreData'));
+                const bricks = entities.filter(e => e.hasComponent('brickData'));
+                
+                if (gameState.components.gameStateData.gameWon || gameState.components.gameStateData.gameOver) {
+                return entities;
+                }
+                
+                const isStartScreen = !gameState.components.gameStateData.started && !gameState.components.gameStateData.paused;
+                const isPausedScreen = gameState.components.gameStateData.paused;
+                const isActiveGame = gameState.components.gameStateData.started && !gameState.components.gameStateData.paused;
+                
+                if (isStartScreen) {
+                ctx.font = "30px Arial"; ctx.fillStyle = "#006C6E"; ctx.textAlign = "center";
+                ctx.fillText("BREAKOUT GAME", 640, 360-20);
+                ctx.font = "20px Arial";
+                ctx.fillText("Click or Press SPACE to Start", 640, 360+20);
+                ctx.fillText("Use ← → arrows or mouse", 640, 360+50);
+                }
+                else if (isPausedScreen) {
+                ctx.font = "30px Arial"; ctx.fillStyle = "#006C6E"; ctx.textAlign = "center";
+                ctx.fillText("OOPS! Lost a life", 640, 360-40);
+                ctx.font = "24px Arial";
+                ctx.fillText(`Score: ${scoreEntity?.components.scoreData.value || 0}`, 640, 360-10);
+                ctx.fillText(`Lives: ${livesEntity.components.livesData.value}`, 640, 360+20);
+                ctx.font = "20px Arial";
+                ctx.fillText("Click or Press SPACE to Continue", 640, 360+60);
+                }
+                else if (isActiveGame) {
+                bricks.forEach(brick => {
+                    if (brick.components.brickData.status === 1) {
+                    ctx.fillStyle = getBrickColor(brick.components.brickData.row);
+                    ctx.fillRect(brick.components.position.x, brick.components.position.y, 75, 20);
+                    ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
+                    ctx.strokeRect(brick.components.position.x, brick.components.position.y, 75, 20);
+                    }
+                });
+                
+                entities.forEach(e => {
+                    if (e.hasComponents(['position','size']) && !e.hasComponent('brickData')) {
+                    ctx.save();
+                    ctx.translate(e.components.position.x, e.components.position.y);
+                    
+                    if (e.hasComponent('velocity')) {
+                        ctx.beginPath(); 
+                        ctx.arc(10, 10, BALL_RADIUS, 0, Math.PI*2);
+                        ctx.fillStyle = e.components.renderable?.color || '#000';
+                        ctx.fill(); 
+                        ctx.stroke();
+                    }
+                    else if (e.hasComponent('inputControlled')) {
+                        ctx.fillStyle = "#000"; 
+                        ctx.fillRect(0, 0, PADDLE_WIDTH, PADDLE_HEIGHT);
+                    }
+                    ctx.restore();
+                    }
+                });
+                
+                ctx.font = "20px Arial"; ctx.fillStyle = "#000"; ctx.textAlign = "left";
+                ctx.fillText(`Score: ${scoreEntity?.components.scoreData.value || 0}`, 8, 20);
+                ctx.fillText(`Lives: ${livesEntity.components.livesData.value}`, CANVAS_WIDTH-80, 20);
+                }
+                
+                ctx.textAlign = "left";
+                return entities;
+            };
+
+            // === 8. WORLD GENERATION ===
+            const createBricks = () => {
+                const bricks = [], bw=75, bh=20, pad=25, startX = (CANVAS_WIDTH-(12*bw+11*pad))/2;
+                for (let c=0; c<12; c++) for (let r=0; r<10; r++) {
+                bricks.push(new Entity({
+                    position: Position(startX + c*(bw+pad), 30 + r*(bh+pad)),
+                    size: Size(bw,bh), 
+                    brickData: BrickData(1,r), 
+                    renderable: Renderable()
+                }));
+                }
+                return bricks;
+            };
+
+            // === 9. INITIAL WORLD STATE ===
+            let entities = [
+                new Entity({
+                position: Position(640,690), 
+                velocity: Velocity(5,-5), 
+                size: Size(20,20), 
+                renderable: Renderable('#000')
+                }),
+                new Entity({
+                position: Position((CANVAS_WIDTH - PADDLE_WIDTH)/2, PADDLE_Y), 
+                size: Size(PADDLE_WIDTH,PADDLE_HEIGHT), 
+                inputControlled: InputControlled(), 
+                renderable: Renderable()
+                }),
+                new Entity({ inputEvent: InputEvent(0, {left: false, right: false, spacePressed: false}, false) }),
+                new Entity({ scoreData: ScoreData(0) }),
+                new Entity({livesData: LivesData(3)}),
+                new Entity({gameStateData: GameStateData(false,false,false,false)}),
+                ...createBricks()
+            ];
+
+            // === 10. SYSTEM COMPOSITION (Function composition via pipe) ===
+            const gameSystems = pipe(PhysicsSystem, CollisionSystem, ScoreSystem, LivesSystem);
+
+            // === 11. INPUT EVENT LISTENERS (Update globalInput state) ===
+            document.addEventListener("keydown", e => {
+                if (e.key === "Right" || e.key === "ArrowRight") {
+                globalInput.right = true;
+                globalInput.mouseMoved = false;
+                } else if (e.key === "Left" || e.key === "ArrowLeft") {
+                globalInput.left = true;
+                globalInput.mouseMoved = false;
+                } else if (e.key === " ") {
+                e.preventDefault();
+                globalInput.spacePressed = true;
+                }
+            });
+
+            document.addEventListener("keyup", e => {
+                if (e.key === "Right" || e.key === "ArrowRight") {
+                globalInput.right = false;
+                }
+                if (e.key === "Left" || e.key === "ArrowLeft") {
+                globalInput.left = false;
+                }
+                if (e.key === " ") {
+                globalInput.spacePressed = false;
+                }
+            });
+
+            document.addEventListener("mousemove", e => {
+                const relativeX = e.clientX - canvas.offsetLeft;
+                if (relativeX > 0 && relativeX < canvas.width) {
+                globalInput.mouseX = relativeX;
+                if (Math.abs(relativeX - globalInput.lastMouseX) > 1) {
+                    globalInput.mouseMoved = true;
+                }
+                globalInput.lastMouseX = relativeX;
+                }
+            });
+
+            setInterval(() => {
+                if (!globalInput.left && !globalInput.right) {
+                globalInput.mouseMoved = false;
+                }
+            }, 100);
+
+            canvas.addEventListener("click", () => {
+                globalInput.spacePressed = true;
+            });
+
+            // === 12. MAIN GAME LOOP (ECS systems executed in order) ===
+            const renderLoop = () => {
+                entities = InputSystem(entities);
+                
+                const gameState = entities.find(e => e.hasComponent('gameStateData'));
+                if (gameState.components.gameStateData.started && !gameState.components.gameStateData.paused &&
+                    !gameState.components.gameStateData.gameWon && !gameState.components.gameStateData.gameOver) {
+                    entities = gameSystems(entities);
+                }
+                entities = RenderSystem(entities);
+                requestAnimationFrame(renderLoop);
+            };
+
+            renderLoop();
+        </script>
+    </body>
+</html>
